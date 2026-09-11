@@ -1,0 +1,31 @@
+id: neutral-baseline
+display_name: Neutral baseline
+
+# Used with mode: random to isolate algorithmic effects from behavioural ones.
+# In random mode the persona is never shown to an LLM; it exists only so the arm has
+# habits (pacing, watch depth) comparable to the persona arms.
+
+demographics:
+  age: 30
+  sex: unspecified
+  nationality: US
+  languages: [en-US]
+
+interests:
+  - topic: Unspecified
+    weight: 1
+
+habits:
+  videos_per_session: { min: 6, max: 14 }
+  watch_fraction: { min: 0.3, max: 0.95 }
+  dwell_seconds: { min: 60, max: 600 }
+  skip_probability: 0.2
+  search_probability: 0.0
+
+bio: >
+  A baseline viewer with no stated preferences. Selections are made uniformly at
+  random over the visible recommendations rather than by any model.
+
+notes: >
+  Control arm. Every experiment should include one; without it, a divergence between
+  two personas cannot be separated from ordinary recommendation churn.

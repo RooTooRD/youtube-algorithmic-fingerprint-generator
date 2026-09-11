@@ -1,0 +1,35 @@
+id: demo-single-persona
+description: >
+  Smoke test. One persona, one account, 10 exploration steps after a shared warm-up.
+  Observation-only: no likes, no subscribes, no comments.
+
+mode: single
+personas:
+  - persona: amina-22-dz-student
+
+context: warmup-neutral
+steps: 10
+repetitions: 1
+
+surfaces: [home, watch_next]
+
+accounts:
+  - amina-01
+
+llm:
+  provider: claude
+  model: claude-sonnet-5
+  temperature: 1.0
+  max_tokens: 1024
+
+interactions:
+  like: false
+  dislike: false
+  subscribe: false
+
+pacing:
+  step_delay_seconds: { min: 6, max: 25 }
+  session_gap_seconds: { min: 600, max: 3600 }
+  max_requests_per_hour: 180
+
+concurrency: 1

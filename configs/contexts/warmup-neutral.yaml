@@ -1,0 +1,16 @@
+id: warmup-neutral
+description: >
+  Shared phase-1 exposure. Every agent in an experiment watches these in order before
+  its persona takes over, so that post-warm-up divergence is attributable to the
+  persona rather than to cold-start variance.
+
+  Replace these placeholders with real, topic-balanced seed IDs before running a study,
+  and pre-register the selection criteria — TRACE chose stance-balanced seeds and said
+  so in advance, which is what made their lean measurements defensible.
+
+watch_fraction: 0.9
+
+videos:
+  - dQw4w9WgXcQ # placeholder — replace
+  - aqz-KE-bpKQ # placeholder — replace
+  - jNQXAC9IVRw # placeholder — replace

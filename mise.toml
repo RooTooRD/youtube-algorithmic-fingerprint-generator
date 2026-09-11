@@ -1,0 +1,35 @@
+[tools]
+python = '3.13'
+uv = '0.12'
+lefthook = 'latest'
+
+[env]
+_.python.venv = { path = ".venv", create = true }
+YAFG_DATA_DIR = "{{config_root}}/data"
+YAFG_PROFILE_DIR = "{{config_root}}/data/profiles"
+YAFG_DB_URL = "sqlite+aiosqlite:///{{config_root}}/data/yafg.db"
+
+[tasks.install]
+run = '''
+uv sync
+uv run playwright install chromium
+mkdir -p ${YAFG_DATA_DIR} ${YAFG_PROFILE_DIR}
+'''
+
+[tasks.lint]
+run = 'uv run ruff check . && uv run ruff format --check .'
+
+[tasks.fmt]
+run = 'uv run ruff check --fix . && uv run ruff format .'
+
+[tasks.typecheck]
+run = 'uv run ty check'
+
+[tasks.test]
+run = 'uv run pytest'
+
+[tasks.check]
+depends = ['lint', 'typecheck', 'test']
+
+[tasks.migrate]
+run = 'uv run alembic upgrade head'

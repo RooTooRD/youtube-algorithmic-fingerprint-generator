@@ -1,0 +1,28 @@
+# Secrets and identity material — NEVER commit
+.env
+.env.*
+!.env.example
+data/
+*.storage_state.json
+secrets/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# Exports
+exports/
+*.parquet
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
