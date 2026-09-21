@@ -9,10 +9,13 @@ import typer
 import yaml
 from pydantic import ValidationError
 from rich.console import Console
+from rich.panel import Panel
 from rich.table import Table
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from yafg.agent.prompt import PROMPT_VERSION, render_persona_prompt
 from yafg.browser.driver import ChallengeDetected, LoginRequired, YouTubeDriver
+from yafg.experiment.runner import execute_experiment, plan_runs, resolve_experiment, validate_accounts
 from yafg.identity.registry import AccountRegistry
 from yafg.identity.schema import Account, ProxyConfig
 from yafg.personas.schema import Persona
@@ -198,14 +201,63 @@ def persona_lint(path: Path = Path("configs/personas")) -> None:
 
 @persona_app.command("show")
 def persona_show(persona_id: str) -> None:
-    """Render the resolved persona and prompt (P2)."""
-    raise NotImplementedError("P2")
+    """Render a validated persona and the exact versioned system prompt."""
+    path = settings.config_dir / "personas" / f"{persona_id}.yaml"
+    try:
+        persona = Persona.model_validate(_load_yaml(path))
+        if persona.id != persona_id:
+            raise ValueError(f"persona id {persona.id!r} does not match requested id {persona_id!r}")
+    except (OSError, ValueError, ValidationError) as exc:
+        console.print(f"[red]Persona load failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+    console.print(Panel.fit(f"[bold]{persona.display_name}[/bold]\nID: {persona.id}\nPrompt: {PROMPT_VERSION}"))
+    console.print(render_persona_prompt(persona))
 
 
 @app.command()
-def run(experiment: Path, dry_run: bool = False) -> None:
-    """Execute an experiment (P3 runner; agent protocol arrives in P2)."""
-    raise NotImplementedError("P3")
+def run(
+    experiment: Path,
+    dry_run: bool = typer.Option(False, "--dry-run", help="Validate and print the plan without opening YouTube."),
+    headed: bool = typer.Option(False, "--headed", help="Show the browser while the run executes."),
+) -> None:
+    """Run a P2 experiment serially, preserving partial evidence on failure."""
+
+    async def _run() -> list[str]:
+        resolved = resolve_experiment(experiment)
+        plan = plan_runs(resolved)
+        settings.ensure_dirs()
+        engine = make_engine()
+        try:
+            await ensure_schema(engine)
+            accounts = await validate_accounts(engine, resolved, plan)
+            console.print(
+                f"Manifest [bold]{resolved.manifest_hash}[/bold] — prompt {PROMPT_VERSION}, "
+                f"{resolved.experiment.steps} exploration steps"
+            )
+            table = Table("Repetition", "Arm", "Account", "Behavior seed", "Account status")
+            for item, account in zip(plan, accounts, strict=True):
+                table.add_row(
+                    str(item.repetition),
+                    item.arm,
+                    item.account_label,
+                    str(item.behavior_seed),
+                    account.status,
+                )
+            console.print(table)
+            if dry_run:
+                console.print("[green]Dry run valid.[/green] No browser or LLM call was made.")
+                return []
+            return await execute_experiment(engine, resolved, headless=False if headed else None)
+        finally:
+            await engine.dispose()
+
+    try:
+        run_ids = asyncio.run(_run())
+    except Exception as exc:
+        console.print(f"[red]Run failed:[/red] {type(exc).__name__}: {exc}")
+        raise typer.Exit(code=1) from exc
+    if run_ids:
+        console.print(f"[green]Completed[/green] {len(run_ids)} run(s): {', '.join(run_ids)}")
 
 
 @app.command()
