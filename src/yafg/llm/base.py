@@ -1,13 +1,4 @@
-"""LLM port.
-
-The agent loop depends on this interface only. Swapping the model is an experimental
-variable (the TRACE paper used Mistral Small 3.2 at <$0.01/agent), so no provider
-specifics leak past this boundary.
-
-The model's job is narrow: given a persona and a ranked candidate list, pick one index
-and justify it. It does not drive the browser, choose pacing, or decide watch depth —
-those are sampled from `ViewingHabits` so they stay reproducible and cheap.
-"""
+"""LLM port used by the agent protocol."""
 
 from __future__ import annotations
 
@@ -17,35 +8,37 @@ from pydantic import BaseModel, Field
 
 
 class Candidate(BaseModel):
-    """One recommendation offered to the model, in rendered rank order."""
+    """One rendered recommendation slot.
 
-    rank: int
-    video_id: str
-    title: str
+    Metadata is nullable by design. Rank fidelity is evidence: a slot that fails to
+    parse remains present rather than shifting every recommendation below it.
+    """
+
+    rank: int = Field(ge=0)
+    video_id: str | None = None
+    title: str | None = None
     channel_name: str | None = None
+    channel_id: str | None = None
     duration_label: str | None = None
     badge: str | None = None
 
 
 class Choice(BaseModel):
-    """Structured model output. `rank` indexes into the candidate list it was given."""
+    """Structured model output; the agent validates the rank against candidates."""
 
     rank: int = Field(ge=0)
     justification: str = Field(min_length=1, max_length=600)
-    interest_match: str | None = Field(
-        default=None, description="Which of the persona's stated interests this choice serves, if any."
-    )
+    interest_match: str | None = Field(default=None)
 
 
 class Usage(BaseModel):
     input_tokens: int = 0
     output_tokens: int = 0
     model: str = ""
+    fallback_reason: str | None = None
 
 
 class LLMProvider(Protocol):
-    """Implemented by `yafg.llm.claude.ClaudeProvider` and `yafg.llm.ollama.OllamaProvider`."""
-
     async def choose(
         self,
         *,
@@ -53,11 +46,5 @@ class LLMProvider(Protocol):
         history: list[str],
         candidates: list[Candidate],
     ) -> tuple[Choice, Usage]:
-        """Pick one candidate.
-
-        Implementations MUST return a rank present in `candidates`; on a malformed or
-        out-of-range response they retry once, then fall back to rank 0 and record the
-        failure in the usage payload. A hard error here must never abort a run —
-        an agent that cannot decide behaves like a user who takes the top result.
-        """
+        """Return a proposed choice; the agent owns final rank validation/fallback."""
         ...
