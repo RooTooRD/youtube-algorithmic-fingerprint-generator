@@ -110,7 +110,7 @@ class ViewingHabits(BaseModel):
     shorts_probability: float = Field(default=0.0, ge=0, le=1)
     active_hours: list[int] = Field(
         default_factory=lambda: list(range(8, 24)),
-        description="Local hours (0-23) during which this persona plausibly browses.",
+        description="Local browsing hours (0-23); consumed by the P3 scheduler, not the P2 serial loop.",
     )
     device: Device = "desktop"
 

@@ -33,6 +33,7 @@ class Context(BaseModel):
     description: str
     videos: list[VideoId] = Field(min_length=1)
     watch_fraction: float = Field(default=0.9, gt=0, le=1)
+    max_watch_seconds: float = Field(default=600, ge=0, le=3600, description="Hard wall-clock cap per warm-up video.")
 
 
 class Interactions(BaseModel):
