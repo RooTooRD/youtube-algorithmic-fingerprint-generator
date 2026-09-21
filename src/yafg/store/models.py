@@ -1,13 +1,4 @@
-"""Persistence model.
-
-Design rule: **every row is append-only evidence**. The tables below record what the
-agent saw and what it chose, never a mutated "current state". Reproducibility comes
-from snapshotting the resolved persona and experiment into the run row, so config
-edits cannot retroactively rewrite what a finished run meant.
-
-Runs on SQLite (default, single-researcher) or Postgres (parallel agents). JSON
-columns use SQLAlchemy's dialect-neutral `JSON` type for that reason.
-"""
+"""Persistence model for experiment evidence and provisioned account metadata."""
 
 from __future__ import annotations
 
@@ -15,7 +6,7 @@ import datetime as dt
 import uuid
 from typing import Any, ClassVar
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -29,6 +20,30 @@ def _now() -> dt.datetime:
 
 class Base(DeclarativeBase):
     type_annotation_map: ClassVar[dict[Any, Any]] = {dict[str, Any]: JSON, list[str]: JSON}
+
+
+class AccountRecord(Base):
+    """Persistent metadata for one manually provisioned browser identity.
+
+    Secrets are never stored here. Proxy passwords are represented only by the name
+    of an environment variable in ``proxy_config``.
+    """
+
+    __tablename__ = "accounts"
+
+    label: Mapped[str] = mapped_column(String(64), primary_key=True)
+    persona_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(16), default="unprovisioned", index=True)
+    profile_dir: Mapped[str] = mapped_column(Text)
+    locale: Mapped[str] = mapped_column(String(32), default="en-US")
+    timezone: Mapped[str] = mapped_column(String(64), default="UTC")
+    country: Mapped[str | None] = mapped_column(String(2), nullable=True)
+    geolocation: Mapped[list[float] | None] = mapped_column(JSON, nullable=True)
+    viewport: Mapped[list[int]] = mapped_column(JSON, default=lambda: [1440, 900])
+    proxy_config: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_checked_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
 
 class Experiment(Base):
@@ -46,18 +61,16 @@ class Experiment(Base):
 
 
 class Run(Base):
-    """One agent executing one arm of an experiment: a persona (or persona policy),
-    on one account, for N steps."""
-
     __tablename__ = "runs"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     experiment_id: Mapped[str] = mapped_column(ForeignKey("experiments.id"), index=True)
-    arm: Mapped[str] = mapped_column(String(64), doc="Human-readable arm label, e.g. 'amina-dz/rep2'.")
+    arm: Mapped[str] = mapped_column(String(64))
     repetition: Mapped[int] = mapped_column(Integer, default=0)
     account_label: Mapped[str | None] = mapped_column(String(64), nullable=True)
     persona_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON)
     context_snapshot: Mapped[dict[str, Any]] = mapped_column(JSON)
+    behavior_seed: Mapped[int] = mapped_column(Integer, default=0)
     status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
     failure: Mapped[str | None] = mapped_column(Text, nullable=True)
     started_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -68,16 +81,14 @@ class Run(Base):
 
 
 class Step(Base):
-    """One observe -> decide -> act cycle."""
-
     __tablename__ = "steps"
     __table_args__ = (UniqueConstraint("run_id", "index", name="uq_step_run_index"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"), index=True)
     index: Mapped[int] = mapped_column(Integer)
-    phase: Mapped[str] = mapped_column(String(16), doc="'context' (warm-up) or 'exploration'.")
-    active_persona: Mapped[str] = mapped_column(String(64), doc="Matters in mixed/sequential modes.")
+    phase: Mapped[str] = mapped_column(String(16))
+    active_persona: Mapped[str | None] = mapped_column(String(64), nullable=True)
     surface: Mapped[str] = mapped_column(String(24))
     source_video_id: Mapped[str | None] = mapped_column(String(16), nullable=True)
     chosen_video_id: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
@@ -93,29 +104,25 @@ class Step(Base):
 
 
 class Observation(Base):
-    """One recommendation slot as rendered, with its rank. This is the primary
-    measurement; everything else is provenance for it."""
+    """One rendered recommendation slot. Metadata may be absent; rank may not."""
 
     __tablename__ = "observations"
-    __table_args__ = (Index("ix_obs_step_rank", "step_id", "rank"),)
+    __table_args__ = (UniqueConstraint("step_id", "rank", name="uq_observation_step_rank"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     step_id: Mapped[str] = mapped_column(ForeignKey("steps.id"), index=True)
     rank: Mapped[int] = mapped_column(Integer)
-    video_id: Mapped[str] = mapped_column(String(16), index=True)
+    video_id: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
     title: Mapped[str | None] = mapped_column(Text, nullable=True)
     channel_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     channel_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    badge: Mapped[str | None] = mapped_column(String(64), nullable=True, doc="e.g. 'Live', 'Mix', 'Shorts'.")
+    badge: Mapped[str | None] = mapped_column(String(64), nullable=True)
     was_chosen: Mapped[bool] = mapped_column(Boolean, default=False)
 
     step: Mapped[Step] = relationship(back_populates="observations")
 
 
 class Video(Base):
-    """Enrichment cache, filled asynchronously by the YouTube Data API worker so the
-    browsing loop never blocks on metadata."""
-
     __tablename__ = "videos"
 
     id: Mapped[str] = mapped_column(String(16), primary_key=True)
@@ -134,10 +141,6 @@ class Video(Base):
 
 
 class Event(Base):
-    """Structured audit log: navigations, rate-limit waits, consent walls, CAPTCHA
-    detections, login-state losses. Separate from steps so operational noise never
-    pollutes the measurement tables."""
-
     __tablename__ = "events"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
