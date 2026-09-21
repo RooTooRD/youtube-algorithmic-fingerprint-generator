@@ -8,7 +8,7 @@ under it can be exercised end-to-end.
 Repo, tooling, package layout, CI. Persona / experiment / account schemas, storage
 model, CLI surface, ethics boundary, ADR log.
 
-## P1 — Identity and observation
+## P1 — Identity and observation — implemented, live smoke test pending
 
 The point where this stops being a schema and starts producing data.
 

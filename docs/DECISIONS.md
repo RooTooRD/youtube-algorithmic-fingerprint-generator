@@ -80,3 +80,34 @@ Every other project in this workspace pins 3.14. This one pins 3.13 because Play
 and greenlet wheel coverage lags a release, and the browser layer is the one place
 where a source build is genuinely painful. Revisit once `playwright` publishes 3.14
 wheels.
+
+## 0007 — Accounts bind to study arms, not necessarily one persona
+
+**2026-09-21**
+
+ADR 0003's sentence saying an account is always bound 1:1 to a persona was too strong
+for the behavior modes the project already defines. `mixed` and `sequential` are
+explicitly policies in which one continuing browser history expresses more than one
+persona over time.
+
+The durable invariant is therefore: **one account belongs to one experimental arm for
+the life of a study and is never shared concurrently between arms.** A `persona_id`
+may still be recorded as provenance for a `single` arm. Mixed/sequential arms bind to
+the policy/arm, not falsely to several persona IDs.
+
+This supersedes only the 1:1-persona consequence in ADR 0003. The Persona / Account /
+Context separation itself remains unchanged.
+
+## 0008 — Rank is evidence even when metadata is missing
+
+**2026-09-21**
+
+Recommendation slots are stored by rendered, zero-based rank even when the scraper
+cannot recover a video ID or title. `Candidate` and `Observation` therefore permit
+nullable metadata, while `(step_id, rank)` is unique in the database.
+
+An LLM choice is not trusted merely because it validates as an integer. The agent
+validates that the proposed rank maps to a selectable video. If it does not, the
+protocol deterministically chooses the first rendered slot with a parseable video ID
+and records the fallback reason. If no slot is selectable, the step fails explicitly
+rather than fabricating evidence.

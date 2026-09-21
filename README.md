@@ -15,8 +15,10 @@ which established the two-phase LLM-persona audit protocol this project follows.
 The deliberate delta here is **signed-in identity**: TRACE audits signed-out
 personalization, `yafg` audits what a platform does once it believes it knows who you are.
 
-> **Status: P0 — scaffold.** Schemas, storage model and CLI surface are defined;
-> the browser, agent and analysis layers are skeletons. See [ROADMAP](docs/ROADMAP.md).
+> **Status: P1 — identity and observation implemented.** Persistent account profiles,
+> session health checks, home/watch-next observation, real-time watching and the P1 CLI
+> are implemented. A live signed-in smoke test is still required in your environment;
+> the agent/LLM loop begins in P2. See [ROADMAP](docs/ROADMAP.md).
 
 ---
 

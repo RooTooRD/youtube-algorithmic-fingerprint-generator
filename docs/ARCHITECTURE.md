@@ -19,7 +19,7 @@ while YouTube's DOM and the model lineup both churn underneath it.
 
 ```
 Persona   the experimental variable    (varies between arms)
-Account   the identity material        (pinned 1:1 to a persona)
+Account   the identity material        (pinned 1:1 to a study arm)
 Context   the shared warm-up exposure  (identical across all arms)
 ```
 
@@ -62,7 +62,7 @@ compute them retroactively.
 ## Failure model
 
 - `LoginRequired` / `ChallengeDetected` → run marked `failed`, steps so far kept.
-- Malformed LLM response → one retry, then rank 0, logged in `Step.llm_usage`.
+- Malformed/out-of-range LLM choice → provider may retry once; the agent then falls back to the first selectable rendered rank and records the reason in `Step.llm_usage`.
 - Scrape parse failure on a slot → the slot is still recorded with its rank and null
   metadata. A missing title must not shift the ranks of its neighbours.
 - Enrichment failure → `Video.enriched_at` stays null; retried on the next pass.
@@ -70,5 +70,5 @@ compute them retroactively.
 ## Concurrency
 
 One OS process per agent, one persistent browser profile per account, one account per
-arm. Postgres is the store once agents run in parallel; SQLite is fine for a single
+arm/policy. Postgres is the store once agents run in parallel; SQLite is fine for a single
 researcher and stays the default so a fresh clone runs with no services.
