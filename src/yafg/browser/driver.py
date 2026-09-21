@@ -8,7 +8,7 @@ import re
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote_plus, urlparse
 
 from yafg.browser import selectors
 from yafg.experiment.schema import Interactions, Surface
@@ -201,9 +201,9 @@ class YouTubeDriver:
             await self._scroll_for_observation()
             locator = self.page.locator(selectors.HOME_SLOTS)
         elif surface == "watch_next":
-            if source_video_id is not None:
+            if source_video_id is not None and _video_id_from_href(self.page.url) != source_video_id:
                 await self._goto(f"https://www.youtube.com/watch?v={source_video_id}")
-            elif "/watch" not in self.page.url:
+            elif source_video_id is None and "/watch" not in self.page.url:
                 raise ValueError("watch_next requires source_video_id unless already on a watch page")
             await self.assert_signed_in()
             await self._scroll_for_observation()
@@ -247,7 +247,22 @@ class YouTubeDriver:
         )
 
     async def search(self, query: str) -> list[Candidate]:
-        raise NotImplementedError("P2")
+        query = query.strip()
+        if not query:
+            raise ValueError("search query cannot be empty")
+        await self._goto(f"https://www.youtube.com/results?search_query={quote_plus(query)}")
+        await self.assert_signed_in()
+        await self._scroll_for_observation()
+        locator = self.page.locator(selectors.SEARCH_SLOTS)
+        count = await locator.count()
+        candidates: list[Candidate] = []
+        for rank in range(count):
+            slot = locator.nth(rank)
+            try:
+                candidates.append(await self._candidate_from_slot(slot, rank))
+            except Exception:
+                candidates.append(Candidate(rank=rank))
+        return candidates
 
     def _require_interaction(self, name: str) -> None:
         configured = bool(getattr(self.interactions, name, False))
@@ -256,17 +271,42 @@ class YouTubeDriver:
                 f"{name} requires both experiment interactions.{name}=true and YAFG_ALLOW_INTERACTIONS=1"
             )
 
+    async def _ensure_video_page(self, video_id: str) -> None:
+        if _video_id_from_href(self.page.url) != video_id:
+            await self._goto(f"https://www.youtube.com/watch?v={video_id}")
+        await self.assert_signed_in()
+
     async def like(self, video_id: str) -> None:
         self._require_interaction("like")
-        raise NotImplementedError("P2")
+        await self._ensure_video_page(video_id)
+        button = self.page.locator(selectors.LIKE_BUTTON).first
+        await button.wait_for(state="visible", timeout=10_000)
+        if (await button.get_attribute("aria-pressed")) != "true":
+            await button.click()
 
     async def dislike(self, video_id: str) -> None:
         self._require_interaction("dislike")
-        raise NotImplementedError("P2")
+        await self._ensure_video_page(video_id)
+        button = self.page.locator(selectors.DISLIKE_BUTTON).first
+        await button.wait_for(state="visible", timeout=10_000)
+        if (await button.get_attribute("aria-pressed")) != "true":
+            await button.click()
 
     async def subscribe(self, channel_id: str) -> None:
         self._require_interaction("subscribe")
-        raise NotImplementedError("P2")
+        if "/watch" not in self.page.url:
+            raise ValueError("subscribe requires an open watch page for the selected channel")
+        channel_href = await _attr(self.page.locator(selectors.CHANNEL_LINK), "href")
+        rendered_channel_id = None
+        if channel_href and "/channel/" in channel_href:
+            rendered_channel_id = channel_href.split("/channel/", 1)[1].split("/", 1)[0].split("?", 1)[0]
+        if rendered_channel_id != channel_id:
+            raise ValueError("refusing subscription: current watch page channel could not be verified")
+        button = self.page.locator(selectors.SUBSCRIBE_BUTTON).first
+        await button.wait_for(state="visible", timeout=10_000)
+        text = ((await button.inner_text()) or "").strip().lower()
+        if "subscribed" not in text:
+            await button.click()
 
     @staticmethod
     async def interactive_login(account: Account, *, timeout_seconds: float = 900) -> None:

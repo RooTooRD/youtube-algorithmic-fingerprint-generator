@@ -8,6 +8,8 @@ fails.
 from __future__ import annotations
 
 HOME_SLOTS = "ytd-rich-grid-renderer ytd-rich-item-renderer"
+SEARCH_SLOTS = "ytd-search ytd-video-renderer"
+
 WATCH_NEXT_SLOTS = ", ".join(
     [
         "ytd-watch-next-secondary-results-renderer ytd-compact-video-renderer",
@@ -39,3 +41,9 @@ CHALLENGE_TEXT = (
     "confirm you're not a robot",
     "before you continue to youtube",
 )
+
+# Side-effect controls. These remain double-gated by experiment config and
+# YAFG_ALLOW_INTERACTIONS before the driver will click them.
+LIKE_BUTTON = "#segmented-like-button button, ytd-menu-renderer ytd-toggle-button-renderer:nth-of-type(1) button"
+DISLIKE_BUTTON = "#segmented-dislike-button button, ytd-menu-renderer ytd-toggle-button-renderer:nth-of-type(2) button"
+SUBSCRIBE_BUTTON = "ytd-subscribe-button-renderer button, ytd-subscribe-button-renderer tp-yt-paper-button"
