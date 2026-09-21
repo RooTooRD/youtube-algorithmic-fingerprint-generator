@@ -8,7 +8,7 @@ Four ports; nothing crosses them implicitly.
 |---|---|---|
 | `YouTubeDriver` | `browser/driver.py` | All platform knowledge. Every side effect on YouTube passes through here, which is what makes the interaction budget enforceable in one place. |
 | `LLMProvider` | `llm/base.py` | Given a persona prompt and a ranked candidate list, return one rank + a justification. Nothing else. |
-| store | `store/models.py` | Append-only. No code may UPDATE an observation. |
+| store | `store/evidence.py` | Evidence port; SQLAlchemy adapter. No code may UPDATE an observation. |
 | enricher | `enrich/` | Async, out-of-band. The browsing loop never blocks on metadata. |
 
 The agent loop (`agent/loop.py`) owns the *protocol* and depends only on those ports.
@@ -62,13 +62,18 @@ compute them retroactively.
 ## Failure model
 
 - `LoginRequired` / `ChallengeDetected` → run marked `failed`, steps so far kept.
-- Malformed/out-of-range LLM choice → provider may retry once; the agent then falls back to the first selectable rendered rank and records the reason in `Step.llm_usage`.
+- Malformed/provider-failed LLM response → provider retries once, proposes deterministic
+  rank 0 with a fallback reason, then the agent validates that rank against the rendered
+  set and chooses the first selectable slot if rank 0 itself is unselectable.
+- Provider crash or a rendered set with no selectable video → the full candidate set is
+  persisted with no chosen video before the run fails.
 - Scrape parse failure on a slot → the slot is still recorded with its rank and null
   metadata. A missing title must not shift the ranks of its neighbours.
 - Enrichment failure → `Video.enriched_at` stays null; retried on the next pass.
 
 ## Concurrency
 
-One OS process per agent, one persistent browser profile per account, one account per
-arm/policy. Postgres is the store once agents run in parallel; SQLite is fine for a single
-researcher and stays the default so a fresh clone runs with no services.
+P2 executes repetitions serially (`concurrency=1`), one persistent browser profile per
+account and one distinct account per repetition. P3 adds bounded multi-agent concurrency.
+Postgres is the store once agents run in parallel; SQLite is fine for a single researcher
+and stays the default so a fresh clone runs with no services.

@@ -15,10 +15,11 @@ which established the two-phase LLM-persona audit protocol this project follows.
 The deliberate delta here is **signed-in identity**: TRACE audits signed-out
 personalization, `yafg` audits what a platform does once it believes it knows who you are.
 
-> **Status: P1 — identity and observation implemented.** Persistent account profiles,
-> session health checks, home/watch-next observation, real-time watching and the P1 CLI
-> are implemented. A live signed-in smoke test is still required in your environment;
-> the agent/LLM loop begins in P2. See [ROADMAP](docs/ROADMAP.md).
+> **Status: P2 — agent loop implemented; live end-to-end smoke test pending.** Persistent
+> identities, rank-faithful observation, versioned persona prompts, Claude/Ollama choices,
+> deterministic behavior policies, context/exploration phases, evidence persistence and the
+> serial experiment runner are implemented. P3 adds bounded multi-account concurrency and
+> enrichment. See [ROADMAP](docs/ROADMAP.md).
 
 ---
 
@@ -82,7 +83,7 @@ src/yafg/
   llm/         provider port; Claude and Ollama implementations
   store/       append-only SQLAlchemy model (SQLite or Postgres)
   enrich/      async YouTube Data API metadata backfill
-  experiment/  experiment schema, arm matrix, runner
+  experiment/  experiment schema, manifest resolution, serial P2 runner
   analysis/    rank-weighted metrics, overlap, drift, exporters
 configs/       personas, contexts and experiments as versioned YAML
 ```
@@ -109,12 +110,25 @@ uv run yafg account login amina-01
 uv run yafg run configs/experiments/demo-single-persona.yaml --dry-run
 ```
 
+The dry run resolves the context/personas, validates the provisioned account status,
+prints the canonical manifest hash and run plan, and makes no browser or LLM call.
+For a visible first smoke test:
+
+```bash
+uv run yafg run configs/experiments/demo-single-persona.yaml --headed
+```
+
+Set `llm.provider: ollama` in an experiment to use the local Ollama chat API instead of
+Claude. Random-baseline mode never invokes an LLM at all.
+
 ## Reproducibility
 
-Personas and experiments are snapshotted into the run row at start, and the experiment
-YAML is hashed into `manifest_hash`. Editing a persona file can never retroactively
-change what a finished run meant. Partial runs are kept — a run that dies at step 31
-of 50 is data, not garbage.
+The stored `manifest_hash` is the SHA-256 of a canonical resolved manifest: experiment,
+context, referenced persona snapshots in declared order, prompt version **and template
+text**, implementation version, and the declared behavior seed. Editing a referenced
+config or the prompt therefore changes experimental identity. Each repetition derives a
+stable behavior seed from the declared seed. Partial runs are kept — a run that dies at
+step 31 of 50 is data, not garbage.
 
 ## License
 

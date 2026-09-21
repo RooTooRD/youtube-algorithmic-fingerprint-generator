@@ -24,17 +24,21 @@ The point where this stops being a schema and starts producing data.
 **Done when:** one provisioned account produces a complete, rank-faithful snapshot of
 its home feed and one watch-next list, persisted.
 
-## P2 — The agent loop
+## P2 — The agent loop — implemented, live smoke test pending
 
 - `PersonaPolicy.active_at` for all four behavior modes.
 - Prompt construction from persona → system prompt (versioned; the prompt text is part
   of the manifest hash).
 - `ClaudeProvider` with structured `Choice` output, one retry, rank-0 fallback.
 - `OllamaProvider` for cost-free replication.
-- Context phase, exploration phase, step persistence, event log.
+- Context phase, exploration phase, sampled watch/session behavior, step persistence,
+  and event log.
+- Serial P2 runner plus `--dry-run` preflight; home, watch-next and search surfaces.
 
-**Done when:** `yafg run demo-single-persona.yaml` completes 10 steps and the database
-holds every candidate, rank, choice and justification.
+**Implementation gate passed:** protocol/unit tests cover all four modes, evidence-on-failure,
+provider parsing and manifest resolution. **Operational gate still pending:** run
+`yafg run configs/experiments/demo-single-persona.yaml --headed` against one manually
+provisioned account and verify all 10 live steps in the database.
 
 ## P3 — Scale and enrichment
 
@@ -42,7 +46,8 @@ holds every candidate, rank, choice and justification.
   account per arm, per-agent rate ceiling.
 - Async YouTube Data API enrichment worker (metadata, then transcripts).
 - Postgres path for parallel agents; resume of interrupted runs.
-- `--dry-run` arm matrix and LLM cost estimate.
+- Full arm-matrix `--dry-run` with concurrency scheduling and LLM cost estimate (P2
+  already has a serial validation/plan dry run).
 
 **Done when:** 10 concurrent agents across 3 personas complete 50 steps without an
 account collision or a rate-limit incident.
