@@ -116,6 +116,7 @@ class Observation(Base):
     title: Mapped[str | None] = mapped_column(Text, nullable=True)
     channel_name: Mapped[str | None] = mapped_column(Text, nullable=True)
     channel_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    duration_label: Mapped[str | None] = mapped_column(String(32), nullable=True)
     badge: Mapped[str | None] = mapped_column(String(64), nullable=True)
     was_chosen: Mapped[bool] = mapped_column(Boolean, default=False)
 
