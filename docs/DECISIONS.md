@@ -111,3 +111,18 @@ validates that the proposed rank maps to a selectable video. If it does not, the
 protocol deterministically chooses the first rendered slot with a parseable video ID
 and records the fallback reason. If no slot is selectable, the step fails explicitly
 rather than fabricating evidence.
+
+## 0009 — Prompt text is experimental identity
+
+**2026-09-21**
+
+Persona choice prompts are versioned, but a version label alone is not enough to make a
+study reproducible: two different templates could accidentally retain the same label.
+The canonical manifest therefore includes both the prompt version and the exact template
+text, alongside the resolved experiment, context, persona snapshots, implementation
+version and behavior seed.
+
+`Persona.priors` and researcher notes are deliberately excluded from the model-visible
+persona prompt. Priors are analysis labels; feeding them into the chooser would make the
+measurement partly self-fulfilling. They remain present in the snapshotted persona and
+manifest for downstream analysis.
