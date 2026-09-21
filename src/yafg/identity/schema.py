@@ -1,19 +1,14 @@
 """Account / identity material.
 
-Hard boundary of this project: **accounts are provisioned by a human, never by code.**
-`yafg account login <label>` opens a headed browser at accounts.google.com and waits
-for the operator to sign in themselves. This package never types credentials, never
-registers an account, and never attempts a CAPTCHA. See docs/ETHICS.md.
-
-What the code owns after that: the persistent browser profile, the locale/timezone/
-proxy envelope that must stay pinned to the account for its whole life, and the
-health check that detects a logged-out or challenged session and halts the run.
+Accounts are provisioned by a human, never by code. The framework owns only the
+persistent browser profile and the stable browser/network envelope around it.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Literal, Self
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -23,25 +18,23 @@ AccountStatus = Literal["unprovisioned", "active", "logged_out", "challenged", "
 
 
 class ProxyConfig(BaseModel):
-    """Residential proxy pinned to the account. The paper used residential proxies at
-    ~$0.10/agent specifically to keep a synthetic profile's network origin consistent
-    with its claimed geography — an account that logs in from Belgium and then browses
-    from a datacentre IP is both a detection risk and a confound."""
-
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    server: str = Field(description="e.g. 'http://gate.example.com:8000'")
+    server: str = Field(min_length=1, description="e.g. 'http://gate.example.com:8000'")
     username: str | None = None
     password_env: str | None = Field(
         default=None,
-        description="Name of the env var holding the proxy password. The password itself is never "
-        "stored in config or in the database.",
+        description="Env var containing the proxy password; the secret itself is never persisted.",
     )
 
 
 class Account(BaseModel):
-    """One synthetic identity. Bound 1:1 to a persona for the life of a study —
-    reusing an account across personas contaminates its history."""
+    """One synthetic identity envelope.
+
+    `persona_id` is optional provenance for single-persona studies. Mixed and
+    sequential studies bind the account to the arm/policy instead; they must not
+    pretend that one browser history is 1:1 with several personas.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -61,8 +54,15 @@ class Account(BaseModel):
 
     @model_validator(mode="after")
     def _consistent_envelope(self) -> Self:
+        try:
+            ZoneInfo(self.timezone)
+        except ZoneInfoNotFoundError as exc:
+            raise ValueError(f"unknown IANA timezone {self.timezone!r}") from exc
         if self.geolocation is not None:
             lat, lon = self.geolocation
             if not (-90 <= lat <= 90 and -180 <= lon <= 180):
                 raise ValueError("geolocation out of bounds")
+        width, height = self.viewport
+        if width <= 0 or height <= 0:
+            raise ValueError("viewport dimensions must be positive")
         return self

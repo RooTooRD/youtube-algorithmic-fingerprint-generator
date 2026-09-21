@@ -24,7 +24,7 @@ def _load(path: Path) -> dict:
 @pytest.mark.parametrize("path", sorted(CONFIGS.glob("personas/*.yaml")), ids=lambda p: p.stem)
 def test_persona_yaml_validates(path: Path) -> None:
     persona = Persona.model_validate(_load(path))
-    assert persona.id == path.stem or persona.id
+    assert persona.id == path.stem
     assert abs(sum(w for _, w in persona.normalised_interests) - 1.0) < 1e-9
 
 

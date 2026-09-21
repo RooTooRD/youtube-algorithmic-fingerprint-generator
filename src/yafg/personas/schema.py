@@ -115,9 +115,20 @@ class ViewingHabits(BaseModel):
     device: Device = "desktop"
 
     @model_validator(mode="after")
-    def _hours_in_range(self) -> Self:
+    def _validate_habits(self) -> Self:
+        whole_videos = self.videos_per_session.min.is_integer() and self.videos_per_session.max.is_integer()
+        if self.videos_per_session.min < 1 or not whole_videos:
+            raise ValueError("videos_per_session must contain positive whole numbers")
+        if not 0 <= self.watch_fraction.min <= self.watch_fraction.max <= 1:
+            raise ValueError("watch_fraction must stay within [0, 1]")
+        if self.dwell_seconds.min < 0:
+            raise ValueError("dwell_seconds cannot be negative")
+        if not self.active_hours:
+            raise ValueError("active_hours cannot be empty")
         if any(h < 0 or h > 23 for h in self.active_hours):
             raise ValueError("active_hours entries must be 0-23")
+        if len(set(self.active_hours)) != len(self.active_hours):
+            raise ValueError("active_hours entries must be unique")
         return self
 
 

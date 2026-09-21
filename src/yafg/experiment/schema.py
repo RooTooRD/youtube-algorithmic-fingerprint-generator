@@ -1,7 +1,9 @@
 """Experiment and context schemas.
 
-An experiment is config-as-code: a YAML file that fully determines a run, hashed into
-a `manifest_hash` so two runs claiming to be the same experiment can be proven equal.
+An experiment is config-as-code: a YAML file that fully determines a run. The
+resolved manifest (experiment + referenced configs + prompt version + behavior seed)
+is what should be hashed at run start; hashing raw YAML alone is intentionally not
+part of this schema contract.
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ from yafg.personas.schema import Range, Slug
 BehaviorMode = Literal["single", "mixed", "sequential", "random"]
 Surface = Literal["home", "watch_next", "search", "shorts", "subscriptions"]
 VideoId = Annotated[str, Field(pattern=r"^[A-Za-z0-9_-]{11}$")]
+AccountLabel = Annotated[str, Field(pattern=r"^[a-z0-9][a-z0-9._-]{1,63}$")]
 
 
 def _default_surfaces() -> list[Surface]:
@@ -22,12 +25,7 @@ def _default_surfaces() -> list[Surface]:
 
 
 class Context(BaseModel):
-    """Phase 1: the shared warm-up exposure.
-
-    Every agent in an experiment watches this identical list before its persona takes
-    over. This is what makes cross-persona comparison meaningful — divergence after
-    the context can be attributed to the persona rather than to cold-start noise.
-    """
+    """Phase 1: the shared warm-up exposure."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -38,12 +36,7 @@ class Context(BaseModel):
 
 
 class Interactions(BaseModel):
-    """Which side effects the agent is permitted to produce on the platform.
-
-    Defaults are read-mostly. `comment` is pinned to False by a validator: this
-    framework does not author public content under a synthetic identity, because that
-    is manipulation of a public commons rather than measurement of a private feed.
-    """
+    """Which side effects the agent is permitted to produce on the platform."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -77,13 +70,19 @@ class LLMConfig(BaseModel):
 
 
 class Pacing(BaseModel):
-    """Wall-clock politeness. Caps exist so a misconfigured run cannot turn into load."""
+    """Wall-clock politeness. Caps exist so a bad config cannot become load."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     step_delay_seconds: Range = Range(min=4, max=20)
     session_gap_seconds: Range = Range(min=300, max=3600)
-    max_requests_per_hour: int = Field(default=240, ge=1, le=2000)
+    max_requests_per_hour: int = Field(default=240, ge=1, le=240)
+
+    @model_validator(mode="after")
+    def _non_negative_ranges(self) -> Self:
+        if self.step_delay_seconds.min < 0 or self.session_gap_seconds.min < 0:
+            raise ValueError("pacing ranges cannot contain negative values")
+        return self
 
 
 class Experiment(BaseModel):
@@ -96,17 +95,20 @@ class Experiment(BaseModel):
     context: Slug
     steps: int = Field(ge=1, le=500)
     repetitions: int = Field(default=1, ge=1, le=100)
-    surfaces: list[Surface] = Field(default_factory=_default_surfaces)
-    accounts: list[str] = Field(
+    surfaces: list[Surface] = Field(default_factory=_default_surfaces, min_length=1)
+    accounts: list[AccountLabel] = Field(
         default_factory=list,
-        description="Account labels provisioned via `yafg account login`. Must be >= number of "
-        "concurrent arms; one account is never shared across two arms.",
+        description="Provisioned account labels. Labels must be unique; an account is never shared concurrently.",
     )
     llm: LLMConfig = LLMConfig()
     interactions: Interactions = Interactions()
     pacing: Pacing = Pacing()
     concurrency: int = Field(default=1, ge=1, le=32)
-    switch_every: int | None = Field(default=None, description="Sequential mode only: steps between persona switches.")
+    switch_every: int | None = Field(default=None, ge=1, description="Sequential mode only: steps between switches.")
+    behavior_seed: int = Field(
+        default=0,
+        description="Seed for persona draws, random-baseline choices, pacing, skips and watch-depth sampling.",
+    )
 
     @model_validator(mode="after")
     def _mode_consistency(self) -> Self:
@@ -117,8 +119,10 @@ class Experiment(BaseModel):
                 raise ValueError("sequential mode needs at least two personas to switch between")
             if self.switch_every is None:
                 raise ValueError("sequential mode requires switch_every")
-        # `random` mode is the no-LLM baseline: `llm` is ignored rather than rejected,
-        # so the same file can be re-run under a persona mode by changing one line.
+        elif self.switch_every is not None:
+            raise ValueError("switch_every is only valid in sequential mode")
+        if len(set(self.accounts)) != len(self.accounts):
+            raise ValueError("account labels must be unique: accounts are never shared between concurrent arms")
         if self.accounts and len(self.accounts) < self.concurrency:
             raise ValueError(
                 f"{len(self.accounts)} accounts for concurrency {self.concurrency}: "
