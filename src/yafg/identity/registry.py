@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import builtins
 import datetime as dt
 from pathlib import Path
 from typing import cast
@@ -38,7 +39,7 @@ class AccountRegistry:
     def __init__(self, engine: AsyncEngine) -> None:
         self.engine = engine
 
-    async def list_accounts(self) -> list[Account]:
+    async def list(self) -> builtins.list[Account]:
         async with AsyncSession(self.engine) as session:
             rows = (await session.scalars(select(AccountRecord).order_by(AccountRecord.label))).all()
             return [_to_account(row) for row in rows]

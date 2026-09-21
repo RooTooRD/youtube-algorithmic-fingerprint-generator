@@ -33,7 +33,7 @@ async def test_account_registry_round_trip(tmp_path: Path) -> None:
 
     loaded = await registry.get("amina-01")
     assert loaded == account
-    assert [item.label for item in await registry.list_accounts()] == ["amina-01"]
+    assert [item.label for item in await registry.list()] == ["amina-01"]
 
     changed = await registry.set_status("amina-01", "logged_out")
     assert changed.status == "logged_out"

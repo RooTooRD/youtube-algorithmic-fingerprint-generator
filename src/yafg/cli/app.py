@@ -112,7 +112,7 @@ def account_list() -> None:
     async def _run() -> None:
         registry, engine = await _registry()
         try:
-            accounts = await registry.list_accounts()
+            accounts = await registry.list()
         finally:
             await engine.dispose()
         table = Table("Label", "Status", "Persona", "Locale", "Timezone", "Profile")
@@ -159,7 +159,7 @@ def account_check(label: str | None = None) -> None:
                     return 1
                 accounts = [account]
             else:
-                accounts = await registry.list_accounts()
+                accounts = await registry.list()
             failed = False
             for account in accounts:
                 status, detail = await _check_one(registry, account)
