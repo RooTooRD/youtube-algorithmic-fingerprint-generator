@@ -18,7 +18,7 @@ def _now() -> dt.datetime:
 
 
 class EvidenceStore(Protocol):
-    async def start_run(self, run_id: str) -> None: ...
+    async def start_run(self, run_id: str, *, resume: bool = False) -> None: ...
 
     async def record_event(
         self,
@@ -52,6 +52,10 @@ class EvidenceStore(Protocol):
         watch_fraction: float,
     ) -> None: ...
 
+    async def save_checkpoint(self, run_id: str, checkpoint: Mapping[str, Any]) -> None: ...
+
+    async def load_checkpoint(self, run_id: str) -> dict[str, Any]: ...
+
     async def finish_run(self, run_id: str) -> None: ...
 
     async def fail_run(self, run_id: str, failure: str) -> None: ...
@@ -60,21 +64,25 @@ class EvidenceStore(Protocol):
 class SQLAlchemyEvidenceStore:
     """SQLAlchemy adapter.
 
-    Observation rows are inserted once and never updated. Run status and watch-result
-    fields are mutable lifecycle metadata, not recommendation evidence.
+    Observation rows are inserted once and never updated. Run lifecycle fields,
+    deterministic resume checkpoints, and watch-result fields are mutable metadata.
     """
 
     def __init__(self, engine: AsyncEngine) -> None:
         self.engine = engine
 
-    async def start_run(self, run_id: str) -> None:
+    async def start_run(self, run_id: str, *, resume: bool = False) -> None:
         async with AsyncSession(self.engine) as session:
             run = await session.get(Run, run_id)
             if run is None:
                 raise KeyError(f"unknown run {run_id}")
             run.status = "running"
-            run.started_at = _now()
+            if run.started_at is None:
+                run.started_at = _now()
+            run.ended_at = None
             run.failure = None
+            if resume:
+                run.resume_count += 1
             await session.commit()
 
     async def record_event(
@@ -118,10 +126,11 @@ class SQLAlchemyEvidenceStore:
             )
             session.add(step)
             await session.flush()
+            step_id = step.id
             chosen_rank = choice.rank if choice else None
             session.add_all(
                 Observation(
-                    step_id=step.id,
+                    step_id=step_id,
                     rank=candidate.rank,
                     video_id=candidate.video_id,
                     title=candidate.title,
@@ -134,7 +143,7 @@ class SQLAlchemyEvidenceStore:
                 for candidate in candidates
             )
             await session.commit()
-            return step.id
+            return step_id
 
     async def record_watch_result(
         self,
@@ -151,12 +160,28 @@ class SQLAlchemyEvidenceStore:
             step.watch_fraction = watch_fraction
             await session.commit()
 
+    async def save_checkpoint(self, run_id: str, checkpoint: Mapping[str, Any]) -> None:
+        async with AsyncSession(self.engine) as session:
+            run = await session.get(Run, run_id)
+            if run is None:
+                raise KeyError(f"unknown run {run_id}")
+            run.checkpoint = dict(checkpoint)
+            await session.commit()
+
+    async def load_checkpoint(self, run_id: str) -> dict[str, Any]:
+        async with AsyncSession(self.engine) as session:
+            run = await session.get(Run, run_id)
+            if run is None:
+                raise KeyError(f"unknown run {run_id}")
+            return dict(run.checkpoint or {})
+
     async def finish_run(self, run_id: str) -> None:
         async with AsyncSession(self.engine) as session:
             run = await session.get(Run, run_id)
             if run is None:
                 raise KeyError(f"unknown run {run_id}")
             run.status = "complete"
+            run.failure = None
             run.ended_at = _now()
             await session.commit()
 
@@ -171,6 +196,7 @@ class SQLAlchemyEvidenceStore:
             await session.commit()
 
     async def steps_for_run(self, run_id: str) -> list[Step]:
-        """Convenience for tests/inspection; the agent loop does not depend on it."""
+        """Convenience for tests/recovery inspection; the agent loop does not depend on it."""
         async with AsyncSession(self.engine) as session:
-            return list((await session.scalars(select(Step).where(Step.run_id == run_id).order_by(Step.index))).all())
+            query = select(Step).where(Step.run_id == run_id).order_by(Step.index)
+            return list((await session.scalars(query)).all())

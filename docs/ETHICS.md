@@ -14,7 +14,8 @@ constraints, so the constraints are enforced in code rather than left to intent.
 | No public content authoring | `Interactions.comment: Literal[False]` |
 | Likes/subscribes off by default | Experiment YAML **and** `YAFG_ALLOW_INTERACTIONS=1` |
 | Request ceiling per agent | `Pacing.max_requests_per_hour`, default 180–240 |
-| One account per arm | `Experiment` validator; accounts are never shared concurrently |
+| Public-caption request ceiling | `transcript_max_requests_per_hour`, default 120, maximum 240 |
+| One account per planned run | `Experiment` validator + DB lease; profiles are never shared concurrently |
 
 ## Not enforceable in code — your responsibility
 

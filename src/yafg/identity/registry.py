@@ -7,7 +7,7 @@ import datetime as dt
 from pathlib import Path
 from typing import cast
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from yafg.identity.schema import Account, AccountStatus, ProxyConfig
@@ -35,6 +35,10 @@ def _to_account(row: AccountRecord) -> Account:
     )
 
 
+class AccountInUse(RuntimeError):
+    pass
+
+
 class AccountRegistry:
     def __init__(self, engine: AsyncEngine) -> None:
         self.engine = engine
@@ -55,7 +59,7 @@ class AccountRegistry:
             payload = {
                 "persona_id": account.persona_id,
                 "status": account.status,
-                "profile_dir": str(account.profile_dir),
+                "profile_dir": str(account.profile_dir.resolve()),
                 "locale": account.locale,
                 "timezone": account.timezone,
                 "country": account.country,
@@ -84,3 +88,46 @@ class AccountRegistry:
             await session.commit()
             await session.refresh(row)
             return _to_account(row)
+
+    async def lease_owner(self, label: str) -> str | None:
+        async with AsyncSession(self.engine) as session:
+            return await session.scalar(select(AccountRecord.lease_id).where(AccountRecord.label == label))
+
+    async def acquire_lease(
+        self,
+        label: str,
+        lease_id: str,
+        *,
+        required_status: AccountStatus | None = None,
+    ) -> None:
+        """Atomically reserve a persistent profile for one execution attempt."""
+        conditions = [AccountRecord.label == label, AccountRecord.lease_id.is_(None)]
+        if required_status is not None:
+            conditions.append(AccountRecord.status == required_status)
+        statement = (
+            update(AccountRecord)
+            .where(*conditions)
+            .values(lease_id=lease_id, lease_acquired_at=dt.datetime.now(dt.UTC))
+        )
+        async with AsyncSession(self.engine) as session:
+            acquired = await session.scalar(statement.returning(AccountRecord.label))
+            await session.commit()
+            if acquired is not None:
+                return
+            row = await session.get(AccountRecord, label)
+            if row is None:
+                raise KeyError(label)
+            if row.lease_id is not None:
+                raise AccountInUse(f"account {label!r} is already leased by attempt {row.lease_id!r}")
+            raise ValueError(f"account {label!r} is {row.status!r}, expected {required_status!r}")
+
+    async def release_lease(self, label: str, lease_id: str) -> None:
+        """Release only the matching attempt lease; never clear another process's lease."""
+        statement = (
+            update(AccountRecord)
+            .where(AccountRecord.label == label, AccountRecord.lease_id == lease_id)
+            .values(lease_id=None, lease_acquired_at=None)
+        )
+        async with AsyncSession(self.engine) as session:
+            await session.execute(statement)
+            await session.commit()

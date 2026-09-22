@@ -113,8 +113,10 @@ class Experiment(BaseModel):
 
     @model_validator(mode="after")
     def _mode_consistency(self) -> Self:
-        if self.mode == "single" and len(self.personas) != 1:
-            raise ValueError("single mode takes exactly one persona; use 'mixed' for a weighted pool")
+        if self.mode == "single" and not self.personas:
+            raise ValueError("single mode requires at least one persona arm")
+        if self.mode == "single" and len({ref.persona for ref in self.personas}) != len(self.personas):
+            raise ValueError("single mode persona arms must be unique")
         if self.mode == "sequential":
             if len(self.personas) < 2:
                 raise ValueError("sequential mode needs at least two personas to switch between")
@@ -123,10 +125,12 @@ class Experiment(BaseModel):
         elif self.switch_every is not None:
             raise ValueError("switch_every is only valid in sequential mode")
         if len(set(self.accounts)) != len(self.accounts):
-            raise ValueError("account labels must be unique: accounts are never shared between concurrent arms")
-        if self.accounts and len(self.accounts) < self.concurrency:
+            raise ValueError("account labels must be unique: accounts are never shared between arms")
+        arm_count = len(self.personas) if self.mode == "single" else 1
+        required_accounts = arm_count * self.repetitions
+        if self.accounts and len(self.accounts) < required_accounts:
             raise ValueError(
-                f"{len(self.accounts)} accounts for concurrency {self.concurrency}: "
-                "accounts are never shared between concurrent arms"
+                f"{required_accounts} planned runs require {required_accounts} distinct accounts; "
+                f"only {len(self.accounts)} configured"
             )
         return self

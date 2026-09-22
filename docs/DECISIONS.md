@@ -126,3 +126,64 @@ version and behavior seed.
 persona prompt. Priors are analysis labels; feeding them into the chooser would make the
 measurement partly self-fulfilling. They remain present in the snapshotted persona and
 manifest for downstream analysis.
+
+## 0010 — `single` mode expands to a persona × repetition matrix
+
+**2026-09-21**
+
+P3 changes `single` from “the experiment YAML may name exactly one persona” to “each
+run has exactly one stable persona.” Multiple persona refs in a `single` experiment are
+therefore independent arms, each repeated `repetitions` times and assigned a distinct
+account. Matching repetition numbers across persona arms reuse the same behavior seed.
+
+Mixed and sequential remain policies inside one continuing account history and therefore
+do not expand their persona refs into separate runs. Random remains one model-free control
+arm per repetition.
+
+## 0011 — Resume only from durable deterministic checkpoints
+
+**2026-09-21**
+
+A persistent account makes naive retry scientifically unsafe: after a crash, replaying a
+step might watch the same video twice even if the database never recorded the first watch.
+P3 therefore checkpoints protocol position, history, session counters, PRNG state and the
+next request time after durable evidence is written. It also writes an in-flight marker before
+opening a browser or collecting a recommendation surface. Automatic resume is allowed only
+when no operation is in flight and database steps do not extend beyond the checkpoint.
+
+If an operation or evidence is newer than the safe checkpoint, the run requires manual review.
+The scheduler will not delete evidence, infer whether a browser side effect happened, or
+silently replay an ambiguous step. Restored request timing also prevents a restart from
+bypassing the configured pacing interval.
+
+## 0012 — PostgreSQL for parallel agents; SQLite stays serial
+
+**2026-09-21**
+
+SQLite remains the zero-service default for one researcher and `concurrency=1`, but P3
+requires PostgreSQL for live parallel agents. Browser agents produce independent bursts of
+writes; treating SQLite lock behavior as a reliable parallel evidence store would make
+failures dependent on local timing rather than the experimental protocol.
+
+Dry-run matrix planning is backend-independent. Alembic now uses the application's async
+URL directly, so PostgreSQL migrations stay on asyncpg instead of requiring a second sync
+driver. Every profile open is also protected by a database-backed, non-reentrant lease with a
+unique execution-attempt token. Separate resume processes therefore cannot open the same
+persistent profile concurrently. Hard termination requires an operator to verify that no
+process remains and release the exact observed lease token; leases are never reclaimed merely
+because a wall-clock timeout elapsed.
+
+## 0013 — Metadata is official-API; transcript retrieval is separate and opt-in
+
+**2026-09-21**
+
+Video title/channel/publication/duration/statistics enrichment uses YouTube Data API
+`videos.list` in batches of at most 50 IDs. Transcript state is tracked separately.
+
+The official captions endpoints require OAuth authorization and caption download requires
+permission to edit the video, so an API key cannot generically retrieve arbitrary public
+video transcripts. P3 therefore offers an explicit best-effort public-watch-page caption
+adapter rather than pretending transcript retrieval is part of the supported Data API.
+Metadata-only enrichment remains the default. Public-caption HTTP requests are paced at a
+human-plausible rate capped at 240 per hour, and a challenge or rate-limit response stops the
+pass instead of being retried across the remaining videos.

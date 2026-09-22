@@ -69,11 +69,26 @@ compute them retroactively.
   persisted with no chosen video before the run fails.
 - Scrape parse failure on a slot → the slot is still recorded with its rank and null
   metadata. A missing title must not shift the ranks of its neighbours.
-- Enrichment failure → `Video.enriched_at` stays null; retried on the next pass.
+- Metadata enrichment failure → `metadata_status=error`; retried on the next pass. A
+  missing/deleted public resource is recorded as `not_found`. Transcript state is tracked
+  separately because public captions are not guaranteed to exist or be retrievable.
+- Resume only proceeds from a committed checkpoint. Evidence newer than the checkpoint
+  means browser side effects may be ambiguous, so automatic replay is refused.
 
 ## Concurrency
 
-P2 executes repetitions serially (`concurrency=1`), one persistent browser profile per
-account and one distinct account per repetition. P3 adds bounded multi-agent concurrency.
-Postgres is the store once agents run in parallel; SQLite is fine for a single researcher
-and stays the default so a fresh clone runs with no services.
+P3 expands `single` experiments into persona × repetition runs, then schedules those runs
+through an `asyncio` semaphore. Each planned run owns one distinct persistent account/profile.
+Mixed/sequential/random modes remain one policy arm per repetition. PostgreSQL is required
+for live `concurrency > 1`; SQLite remains the default for serial research and dry-run
+planning. Failures are isolated per arm so other scheduled runs can finish. Before a browser
+profile is opened, the account registry atomically acquires a non-reentrant, attempt-scoped
+lease; login/check commands use the same mechanism. An orphan can only be released manually
+with its exact observed token after the operator verifies no process still owns the profile.
+
+After each durable watch (and after a decision failure that changed no account state), the
+agent stores its next phase index, global evidence index, history, session counters, request
+`not_before`, and JSON-serialised PRNG state in `Run.checkpoint`. Before opening a browser or
+collecting a surface it persists an in-flight marker. `--resume` reuses only the latest
+incomplete experiment with the exact same manifest hash and rejects in-flight operations or
+evidence newer than the checkpoint rather than guessing whether a platform side effect occurred.

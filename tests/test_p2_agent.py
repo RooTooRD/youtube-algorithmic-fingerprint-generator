@@ -7,7 +7,7 @@ from typing import Any, cast
 import pytest
 
 from yafg.agent.choice import NoSelectableCandidate
-from yafg.agent.loop import AgentRun, PersonaPolicy
+from yafg.agent.loop import AgentRun, PersonaPolicy, _RateGate
 from yafg.agent.prompt import PROMPT_TEMPLATE, PROMPT_VERSION, render_persona_prompt
 from yafg.browser.driver import WatchResult, YouTubeDriver
 from yafg.experiment.schema import Context, Experiment
@@ -60,8 +60,12 @@ class MemoryStore:
     events: list[tuple[str, dict[str, Any], str]] = field(default_factory=list)
     watch_results: list[tuple[str, float, float]] = field(default_factory=list)
 
-    async def start_run(self, run_id: str) -> None:
+    checkpoints: list[dict[str, Any]] = field(default_factory=list)
+    resumed: bool = False
+
+    async def start_run(self, run_id: str, *, resume: bool = False) -> None:
         self.started = True
+        self.resumed = resume
 
     async def record_event(
         self, run_id: str, kind: str, *, payload: Mapping[str, Any] | None = None, level: str = "info"
@@ -74,6 +78,12 @@ class MemoryStore:
 
     async def record_watch_result(self, step_id: str, *, watched_seconds: float, watch_fraction: float) -> None:
         self.watch_results.append((step_id, watched_seconds, watch_fraction))
+
+    async def save_checkpoint(self, run_id: str, checkpoint: Mapping[str, Any]) -> None:
+        self.checkpoints.append(dict(checkpoint))
+
+    async def load_checkpoint(self, run_id: str) -> dict[str, Any]:
+        return dict(self.checkpoints[-1]) if self.checkpoints else {}
 
     async def finish_run(self, run_id: str) -> None:
         self.finished = True
@@ -211,6 +221,24 @@ async def test_random_baseline_never_calls_llm() -> None:
     assert step["choice"].justification.startswith("Uniform random baseline")
 
 
+@pytest.mark.asyncio
+async def test_rate_gate_enforces_restored_not_before(monkeypatch: pytest.MonkeyPatch) -> None:
+    sleeps: list[float] = []
+    clock = iter([90.0, 100.0])
+
+    async def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    monkeypatch.setattr("yafg.agent.loop.time.time", lambda: next(clock))
+    gate = _RateGate(240, sleep=sleep)
+    gate.not_before = 100
+
+    await gate.before_request()
+
+    assert sleeps == [10]
+    assert gate.not_before == 115
+
+
 def test_persona_policy_modes_are_deterministic() -> None:
     alpha = _persona("alpha", "Programming")
     beta = _persona("beta", "Cooking")
@@ -249,3 +277,88 @@ def test_prompt_is_versioned_and_excludes_analysis_only_fields() -> None:
     assert "hidden-analysis-label" not in prompt
     assert "researcher-only note" not in prompt
     assert "{persona_profile}" in PROMPT_TEMPLATE
+
+
+@pytest.mark.asyncio
+async def test_agent_resumes_from_durable_checkpoint_without_replaying_steps() -> None:
+    persona = _persona("alpha")
+    experiment = _experiment(steps=2)
+    context = Context(id="warm", description="warmup", videos=["dQw4w9WgXcQ"], max_watch_seconds=0)
+
+    class InterruptBeforeSecondCollection(MemoryStore):
+        interrupted = False
+
+        async def save_checkpoint(self, run_id: str, checkpoint: Mapping[str, Any]) -> None:
+            if (
+                not self.interrupted
+                and checkpoint.get("in_flight") == "collect:watch_next"
+                and checkpoint.get("next_exploration_index") == 1
+            ):
+                self.interrupted = True
+                raise RuntimeError("simulated interruption before the next browser operation")
+            await super().save_checkpoint(run_id, checkpoint)
+
+    store = InterruptBeforeSecondCollection()
+    first = AgentRun(
+        experiment=experiment,
+        context=context,
+        policy=PersonaPolicy(experiment, {"alpha": persona}),
+        driver=cast(YouTubeDriver, FakeDriver()),
+        llm=FakeLLM(rank=2),
+        store=store,
+        run_id="run-resume",
+        enforce_pacing=False,
+    )
+    with pytest.raises(RuntimeError, match="simulated interruption"):
+        await first.execute()
+
+    checkpoint = store.checkpoints[-1]
+    assert checkpoint["next_context_index"] == 1
+    assert checkpoint["next_exploration_index"] == 1
+    assert checkpoint["global_step_index"] == 2
+    assert checkpoint["in_flight"] is None
+
+    resumed = AgentRun(
+        experiment=experiment,
+        context=context,
+        policy=PersonaPolicy(experiment, {"alpha": persona}),
+        driver=cast(YouTubeDriver, FakeDriver()),
+        llm=FakeLLM(rank=2),
+        store=store,
+        run_id="run-resume",
+        checkpoint=checkpoint,
+        enforce_pacing=False,
+    )
+    await resumed.execute()
+
+    assert store.resumed is True
+    assert [step["index"] for step in store.steps] == [0, 1, 2]
+    assert [step["phase"] for step in store.steps] == ["context", "exploration", "exploration"]
+
+
+@pytest.mark.asyncio
+async def test_agent_marks_interrupted_collection_unsafe() -> None:
+    persona = _persona("alpha")
+    experiment = _experiment(steps=1)
+    context = Context(id="warm", description="warmup", videos=["dQw4w9WgXcQ"], max_watch_seconds=0)
+    store = MemoryStore()
+
+    class InterruptedDriver(FakeDriver):
+        async def collect(self, surface: str, *, source_video_id: str | None = None) -> list[Candidate]:
+            raise RuntimeError("collection interrupted")
+
+    agent = AgentRun(
+        experiment=experiment,
+        context=context,
+        policy=PersonaPolicy(experiment, {"alpha": persona}),
+        driver=cast(YouTubeDriver, InterruptedDriver()),
+        llm=FakeLLM(rank=2),
+        store=store,
+        run_id="run-unsafe",
+        enforce_pacing=False,
+    )
+
+    with pytest.raises(RuntimeError, match="collection interrupted"):
+        await agent.execute()
+
+    assert store.checkpoints[-1]["in_flight"] == "collect:home"

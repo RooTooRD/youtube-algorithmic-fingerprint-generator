@@ -59,15 +59,14 @@ def test_p2_rejects_unimplemented_surface() -> None:
         plan_runs(changed)
 
 
-def test_p2_refuses_concurrent_execution(tmp_path: Path) -> None:
-    # Planner, not the schema, owns the P2-vs-P3 execution capability boundary.
+def test_p3_planner_allows_bounded_concurrency() -> None:
     resolved = resolve_experiment(CONFIGS / "experiments" / "demo-single-persona.yaml")
     changed = resolved.__class__(
-        experiment=resolved.experiment.model_copy(update={"concurrency": 2, "accounts": ["a1", "a2"]}),
+        experiment=resolved.experiment.model_copy(update={"concurrency": 2}),
         context=resolved.context,
         personas=resolved.personas,
         manifest=resolved.manifest,
         manifest_hash=resolved.manifest_hash,
     )
-    with pytest.raises(ValueError, match="P3"):
-        plan_runs(changed)
+    plan = plan_runs(changed)
+    assert len(plan) == 1

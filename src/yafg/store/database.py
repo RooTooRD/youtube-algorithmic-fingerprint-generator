@@ -12,14 +12,19 @@ from yafg.store.models import Base
 
 
 def make_engine(url: str | None = None) -> AsyncEngine:
-    return create_async_engine(url or settings.db_url)
+    database_url = url or settings.db_url
+    kwargs: dict[str, object] = {"pool_pre_ping": True}
+    if database_url.startswith("sqlite"):
+        # SQLite's local single-agent path does not benefit from connection probing.
+        kwargs["pool_pre_ping"] = False
+    return create_async_engine(database_url, **kwargs)
 
 
 async def ensure_schema(engine: AsyncEngine) -> None:
-    """Create missing tables for local/P1 use.
+    """Create missing tables for a fresh local database.
 
-    Production/history upgrades belong to Alembic; this bootstrap only makes a fresh
-    clone usable without a separate migration command.
+    Existing databases must be upgraded with Alembic. ``create_all`` is intentionally
+    retained so a clean clone can still be exercised without a migration bootstrap.
     """
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)

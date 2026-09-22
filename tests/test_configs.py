@@ -50,7 +50,7 @@ def test_commenting_cannot_be_enabled() -> None:
 
 
 def test_accounts_are_not_shared_between_concurrent_arms() -> None:
-    with pytest.raises(ValueError, match="never shared"):
+    with pytest.raises(ValueError, match="planned runs"):
         Experiment.model_validate(
             {
                 "id": "bad",
@@ -59,7 +59,16 @@ def test_accounts_are_not_shared_between_concurrent_arms() -> None:
                 "personas": [{"persona": "neutral-baseline"}],
                 "context": "warmup-neutral",
                 "steps": 5,
+                "repetitions": 2,
                 "accounts": ["only-one"],
                 "concurrency": 2,
             }
         )
+
+
+def test_single_mode_rejects_duplicate_persona_arms() -> None:
+    payload = _load(CONFIGS / "experiments" / "demo-single-persona.yaml")
+    payload["personas"] = [payload["personas"][0], payload["personas"][0]]
+    payload["accounts"] = ["amina-01", "amina-02"]
+    with pytest.raises(ValueError, match="persona arms must be unique"):
+        Experiment.model_validate(payload)

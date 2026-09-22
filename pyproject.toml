@@ -1,6 +1,6 @@
 [project]
 name = "yafg"
-version = "0.2.0"
+version = "0.3.0"
 description = "Persona-driven agents that build real YouTube watch histories, for auditing algorithmic personalization"
 authors = [{ name = "abderrahmane" }]
 readme = "README.md"

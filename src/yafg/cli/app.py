@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 from pathlib import Path
 
 import typer
@@ -15,8 +16,15 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from yafg.agent.prompt import PROMPT_VERSION, render_persona_prompt
 from yafg.browser.driver import ChallengeDetected, LoginRequired, YouTubeDriver
-from yafg.experiment.runner import execute_experiment, plan_runs, resolve_experiment, validate_accounts
-from yafg.identity.registry import AccountRegistry
+from yafg.enrich import EnrichmentWorker, PublicTranscriptClient, YouTubeMetadataClient
+from yafg.experiment.runner import (
+    estimate_llm_cost,
+    execute_experiment,
+    plan_runs,
+    resolve_experiment,
+    validate_accounts,
+)
+from yafg.identity.registry import AccountInUse, AccountRegistry
 from yafg.identity.schema import Account, ProxyConfig
 from yafg.personas.schema import Persona
 from yafg.settings import settings
@@ -86,18 +94,25 @@ def account_login(
                     geolocation=(latitude, longitude) if latitude is not None and longitude is not None else None,
                     proxy=proxy,
                 )
-            await registry.save(account)
-            console.print(f"Opening headed browser for [bold]{label}[/bold]. Sign in manually in that window.")
+                await registry.save(account)
+            lease_id = str(uuid.uuid4())
+            await registry.acquire_lease(label, lease_id)
             try:
-                await YouTubeDriver.interactive_login(account)
-            except ChallengeDetected:
-                await registry.save(account.model_copy(update={"status": "challenged"}), checked=True)
-                raise
-            except LoginRequired:
-                await registry.save(account.model_copy(update={"status": "logged_out"}), checked=True)
-                raise
-            await registry.save(account.model_copy(update={"status": "active"}), checked=True)
-            console.print(f"[green]Verified[/green] signed-in session for {label}.")
+                if existing is not None:
+                    await registry.save(account)
+                console.print(f"Opening headed browser for [bold]{label}[/bold]. Sign in manually in that window.")
+                try:
+                    await YouTubeDriver.interactive_login(account)
+                except ChallengeDetected:
+                    await registry.save(account.model_copy(update={"status": "challenged"}), checked=True)
+                    raise
+                except LoginRequired:
+                    await registry.save(account.model_copy(update={"status": "logged_out"}), checked=True)
+                    raise
+                await registry.save(account.model_copy(update={"status": "active"}), checked=True)
+                console.print(f"[green]Verified[/green] signed-in session for {label}.")
+            finally:
+                await registry.release_lease(label, lease_id)
         finally:
             await engine.dispose()
 
@@ -116,9 +131,10 @@ def account_list() -> None:
         registry, engine = await _registry()
         try:
             accounts = await registry.list()
+            leases = {account.label: await registry.lease_owner(account.label) for account in accounts}
         finally:
             await engine.dispose()
-        table = Table("Label", "Status", "Persona", "Locale", "Timezone", "Profile")
+        table = Table("Label", "Status", "Persona", "Locale", "Timezone", "Profile", "Lease")
         for account in accounts:
             table.add_row(
                 account.label,
@@ -127,6 +143,7 @@ def account_list() -> None:
                 account.locale,
                 account.timezone,
                 str(account.profile_dir),
+                leases[account.label] or "—",
             )
         console.print(table)
         if not accounts:
@@ -135,22 +152,57 @@ def account_list() -> None:
     asyncio.run(_run())
 
 
+@account_app.command("unlock")
+def account_unlock(
+    label: str,
+    lease_id: str = typer.Option(..., "--lease-id", help="Exact lease token shown by `account list`."),
+) -> None:
+    """Release an orphaned lease after verifying no process still owns the profile."""
+
+    async def _run() -> None:
+        registry, engine = await _registry()
+        try:
+            owner = await registry.lease_owner(label)
+            if owner is None:
+                raise ValueError(f"account {label!r} has no active lease")
+            if owner != lease_id:
+                raise ValueError(f"account {label!r} lease changed; run `yafg account list` again")
+            await registry.release_lease(label, lease_id)
+        finally:
+            await engine.dispose()
+
+    try:
+        asyncio.run(_run())
+    except (KeyError, ValueError) as exc:
+        console.print(f"[red]Account unlock failed:[/red] {exc}")
+        raise typer.Exit(code=1) from exc
+    console.print(f"[green]Released[/green] orphaned lease for {label}.")
+
+
 @account_app.command("check")
 def account_check(label: str | None = None) -> None:
     """Verify saved sessions are signed in and unchallenged, without running a study."""
 
     async def _check_one(registry: AccountRegistry, account: Account) -> tuple[str, str]:
+        lease_id = str(uuid.uuid4())
         try:
-            async with YouTubeDriver(account, headless=settings.headless) as driver:
-                identity = await driver.assert_signed_in()
-            await registry.save(account.model_copy(update={"status": "active"}), checked=True)
-            return "active", identity
-        except ChallengeDetected as exc:
-            await registry.save(account.model_copy(update={"status": "challenged"}), checked=True)
-            return "challenged", str(exc)
-        except LoginRequired as exc:
-            await registry.save(account.model_copy(update={"status": "logged_out"}), checked=True)
-            return "logged_out", str(exc)
+            await registry.acquire_lease(account.label, lease_id)
+        except AccountInUse as exc:
+            return "busy", str(exc)
+        try:
+            try:
+                async with YouTubeDriver(account, headless=settings.headless) as driver:
+                    identity = await driver.assert_signed_in()
+                await registry.save(account.model_copy(update={"status": "active"}), checked=True)
+                return "active", identity
+            except ChallengeDetected as exc:
+                await registry.save(account.model_copy(update={"status": "challenged"}), checked=True)
+                return "challenged", str(exc)
+            except LoginRequired as exc:
+                await registry.save(account.model_copy(update={"status": "logged_out"}), checked=True)
+                return "logged_out", str(exc)
+        finally:
+            await registry.release_lease(account.label, lease_id)
 
     async def _run() -> int:
         registry, engine = await _registry()
@@ -217,37 +269,59 @@ def persona_show(persona_id: str) -> None:
 @app.command()
 def run(
     experiment: Path,
-    dry_run: bool = typer.Option(False, "--dry-run", help="Validate and print the plan without opening YouTube."),
-    headed: bool = typer.Option(False, "--headed", help="Show the browser while the run executes."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Validate and print the full arm schedule."),
+    headed: bool = typer.Option(False, "--headed", help="Show each browser while the run executes."),
+    resume: bool = typer.Option(False, "--resume", help="Resume the latest incomplete run set with this manifest."),
 ) -> None:
-    """Run a P2 experiment serially, preserving partial evidence on failure."""
+    """Run the P3 arm matrix with bounded concurrency and safe checkpoints."""
 
     async def _run() -> list[str]:
         resolved = resolve_experiment(experiment)
         plan = plan_runs(resolved)
+        estimate = estimate_llm_cost(resolved, plan)
         settings.ensure_dirs()
         engine = make_engine()
         try:
             await ensure_schema(engine)
-            accounts = await validate_accounts(engine, resolved, plan)
+            if resume and not dry_run:
+                registry = AccountRegistry(engine)
+                accounts = [await registry.get(item.account_label) for item in plan]
+            else:
+                accounts = await validate_accounts(engine, resolved, plan)
             console.print(
                 f"Manifest [bold]{resolved.manifest_hash}[/bold] — prompt {PROMPT_VERSION}, "
-                f"{resolved.experiment.steps} exploration steps"
+                f"{len(plan)} run(s), concurrency {resolved.experiment.concurrency}"
             )
-            table = Table("Repetition", "Arm", "Account", "Behavior seed", "Account status")
+            table = Table("#", "Repetition", "Arm", "Account", "Behavior seed", "Account status")
             for item, account in zip(plan, accounts, strict=True):
                 table.add_row(
+                    str(item.index),
                     str(item.repetition),
                     item.arm,
                     item.account_label,
                     str(item.behavior_seed),
-                    account.status,
+                    account.status if account else "missing",
                 )
             console.print(table)
+            cost = (
+                f"~${estimate.estimated_usd:.4f}"
+                if estimate.estimated_usd is not None
+                else "USD unavailable; set YAFG_LLM_INPUT_USD_PER_MILLION and YAFG_LLM_OUTPUT_USD_PER_MILLION"
+            )
+            console.print(
+                f"LLM envelope: {estimate.llm_calls} calls, ~{estimate.estimated_input_tokens:,} input tokens, "
+                f"≤{estimate.max_output_tokens:,} output tokens; {cost}."
+            )
+            console.print(f"Estimate assumption: {estimate.assumption}.")
             if dry_run:
                 console.print("[green]Dry run valid.[/green] No browser or LLM call was made.")
                 return []
-            return await execute_experiment(engine, resolved, headless=False if headed else None)
+            return await execute_experiment(
+                engine,
+                resolved,
+                headless=False if headed else None,
+                resume=resume,
+            )
         finally:
             await engine.dispose()
 
@@ -261,8 +335,51 @@ def run(
 
 
 @app.command()
-def enrich(limit: int = 500) -> None:
-    raise NotImplementedError("P3")
+def enrich(
+    limit: int = typer.Option(500, min=1, help="Maximum unresolved video IDs to process."),
+    transcripts: bool = typer.Option(
+        False,
+        "--transcripts",
+        help="Also attempt public caption-track retrieval. Metadata-only is the default.",
+    ),
+) -> None:
+    """Backfill video metadata, with optional best-effort public transcripts."""
+
+    async def _run() -> None:
+        if not settings.youtube_api_key:
+            raise ValueError("YOUTUBE_API_KEY is required for enrichment")
+        settings.ensure_dirs()
+        engine = make_engine()
+        worker: EnrichmentWorker | None = None
+        try:
+            await ensure_schema(engine)
+            metadata = YouTubeMetadataClient(settings.youtube_api_key)
+            transcript_client = (
+                PublicTranscriptClient(max_requests_per_hour=settings.transcript_max_requests_per_hour)
+                if transcripts
+                else None
+            )
+            worker = EnrichmentWorker(engine, metadata, transcripts=transcript_client)
+            stats = await worker.run(limit=limit, include_transcripts=transcripts)
+            console.print(
+                f"Discovered {stats.discovered}; metadata complete={stats.metadata_complete}, "
+                f"not-found={stats.metadata_not_found}, errors={stats.metadata_errors}."
+            )
+            if transcripts:
+                console.print(
+                    f"Transcripts complete={stats.transcripts_complete}, "
+                    f"unavailable={stats.transcripts_unavailable}, errors={stats.transcript_errors}."
+                )
+        finally:
+            if worker is not None:
+                await worker.aclose()
+            await engine.dispose()
+
+    try:
+        asyncio.run(_run())
+    except Exception as exc:
+        console.print(f"[red]Enrichment failed:[/red] {type(exc).__name__}: {exc}")
+        raise typer.Exit(code=1) from exc
 
 
 @app.command()

@@ -40,17 +40,21 @@ provider parsing and manifest resolution. **Operational gate still pending:** ru
 `yafg run configs/experiments/demo-single-persona.yaml --headed` against one manually
 provisioned account and verify all 10 live steps in the database.
 
-## P3 — Scale and enrichment
+## P3 — Scale and enrichment — implemented, live scale validation pending
 
-- Experiment runner: arm matrix (personas × repetitions), bounded concurrency, one
-  account per arm, per-agent rate ceiling.
-- Async YouTube Data API enrichment worker (metadata, then transcripts).
-- Postgres path for parallel agents; resume of interrupted runs.
-- Full arm-matrix `--dry-run` with concurrency scheduling and LLM cost estimate (P2
-  already has a serial validation/plan dry run).
+- Experiment runner expands `single` mode into a persona × repetition arm matrix, with
+  bounded concurrency, one distinct account per run, and the existing per-agent rate ceiling.
+- Async YouTube Data API metadata enrichment worker plus explicit opt-in, best-effort
+  public-caption retrieval.
+- PostgreSQL/asyncpg path for parallel agents; SQLite remains the serial/local default.
+- Deterministic per-step checkpoints and conservative `--resume` recovery. Ambiguous
+  uncheckpointed browser side effects are rejected rather than replayed.
+- Full arm-matrix `--dry-run` with account scheduling and transparent LLM token/cost envelope.
 
-**Done when:** 10 concurrent agents across 3 personas complete 50 steps without an
-account collision or a rate-limit incident.
+**Implementation gate passed:** protocol tests cover matrix expansion, concurrency bounds,
+resume checkpoints, backend gating, metadata parsing and transcript parsing. **Operational
+gate still pending:** 10 concurrent agents across 3 personas complete 50 steps on PostgreSQL
+without an account collision or a rate-limit incident.
 
 ## P4 — Analysis and control surface
 

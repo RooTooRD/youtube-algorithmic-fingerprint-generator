@@ -10,8 +10,11 @@ from __future__ import annotations
 import asyncio
 import random
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
+from typing import Any, Literal
+
+from pydantic import BaseModel, ConfigDict, Field
 
 from yafg.agent.choice import NoSelectableCandidate, ResolvedChoice, resolve_choice
 from yafg.agent.prompt import render_persona_prompt
@@ -22,6 +25,39 @@ from yafg.personas.schema import Persona, ViewingHabits
 from yafg.store.evidence import EvidenceStore
 
 Sleep = Callable[[float], Awaitable[None]]
+
+
+class RunCheckpoint(BaseModel):
+    """Deterministic continuation state committed after a protocol step is durable."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    version: Literal[1] = 1
+    phase: Literal["context", "exploration", "complete"] = "context"
+    next_context_index: int = Field(default=0, ge=0)
+    next_exploration_index: int = Field(default=0, ge=0)
+    global_step_index: int = Field(default=0, ge=0)
+    last_video_id: str | None = None
+    history: list[str] = Field(default_factory=list)
+    rng_state: list[Any] | None = None
+    session_remaining: int = Field(default=0, ge=0)
+    session_index: int = -1
+    not_before: float = Field(default=0, ge=0)
+    in_flight: str | None = None
+
+
+def _state_to_json(value: Any) -> Any:
+    if isinstance(value, tuple):
+        return [_state_to_json(item) for item in value]
+    if isinstance(value, list):
+        return [_state_to_json(item) for item in value]
+    return value
+
+
+def _state_to_tuple(value: Any) -> Any:
+    if isinstance(value, list):
+        return tuple(_state_to_tuple(item) for item in value)
+    return value
 
 
 @dataclass(slots=True)
@@ -52,7 +88,7 @@ class PersonaPolicy:
             return self.personas[refs[0].persona]
         if mode == "sequential":
             switch_every = self.experiment.switch_every
-            if switch_every is None:  # schema validation should make this unreachable
+            if switch_every is None:
                 raise AssertionError("sequential mode has no switch_every")
             ref = refs[(step_index // switch_every) % len(refs)]
             return self.personas[ref.persona]
@@ -73,16 +109,13 @@ class _RateGate:
     max_requests_per_hour: int
     enabled: bool = True
     sleep: Sleep = asyncio.sleep
-    _last_request_at: float | None = field(default=None, init=False)
+    not_before: float = field(default=0, init=False)
 
     async def before_request(self) -> None:
         if not self.enabled:
             return
-        min_interval = 3600.0 / self.max_requests_per_hour
-        now = time.monotonic()
-        if self._last_request_at is not None:
-            await self.sleep(max(0.0, min_interval - (now - self._last_request_at)))
-        self._last_request_at = time.monotonic()
+        await self.sleep(max(0.0, self.not_before - time.time()))
+        self.not_before = time.time() + 3600.0 / self.max_requests_per_hour
 
 
 class AgentRun:
@@ -96,6 +129,7 @@ class AgentRun:
         llm: LLMProvider,
         store: EvidenceStore,
         run_id: str,
+        checkpoint: Mapping[str, Any] | None = None,
         sleep: Sleep = asyncio.sleep,
         enforce_pacing: bool = True,
     ) -> None:
@@ -114,21 +148,53 @@ class AgentRun:
             enabled=enforce_pacing,
             sleep=sleep,
         )
-        self._history: list[str] = []
-        self._last_video_id: str | None = None
-        self._global_step_index = 0
+        self.checkpoint = RunCheckpoint.model_validate(checkpoint or {})
+        if self.checkpoint.rng_state is not None:
+            self.rng.setstate(_state_to_tuple(self.checkpoint.rng_state))
+        self.rate_gate.not_before = self.checkpoint.not_before
+        self._history = list(self.checkpoint.history)
+        self._last_video_id = self.checkpoint.last_video_id
+        self._global_step_index = self.checkpoint.global_step_index
+        self._session_remaining = self.checkpoint.session_remaining
+        self._session_index = self.checkpoint.session_index
+
+    @property
+    def is_resume(self) -> bool:
+        return bool(
+            self.checkpoint.global_step_index
+            or self.checkpoint.next_context_index
+            or self.checkpoint.next_exploration_index
+        )
 
     async def execute(self) -> None:
         """Run context + exploration, preserving all evidence written before failure."""
-        await self.store.start_run(self.run_id)
-        await self.store.record_event(self.run_id, "run_started", payload={"mode": self.experiment.mode})
+        await self.store.start_run(self.run_id, resume=self.is_resume)
+        await self.store.record_event(
+            self.run_id,
+            "run_resumed" if self.is_resume else "run_started",
+            payload={
+                "mode": self.experiment.mode,
+                "next_context_index": self.checkpoint.next_context_index,
+                "next_exploration_index": self.checkpoint.next_exploration_index,
+            },
+        )
         try:
+            await self._save_checkpoint(
+                phase=self.checkpoint.phase,
+                next_context_index=self.checkpoint.next_context_index,
+                next_exploration_index=self.checkpoint.next_exploration_index,
+                in_flight="sign_in",
+            )
+            await self.rate_gate.before_request()
             await self.driver.assert_signed_in()
+            await self._save_checkpoint(
+                phase=self.checkpoint.phase,
+                next_context_index=self.checkpoint.next_context_index,
+                next_exploration_index=self.checkpoint.next_exploration_index,
+            )
             await self._run_context_phase()
             await self._run_exploration_phase()
         except Exception as exc:
-            # Keeping the broad catch is deliberate: partial runs are evidence even
-            # when a selector, provider, or persistence boundary fails mid-study.
             await self.store.record_event(
                 self.run_id,
                 "run_failed",
@@ -137,16 +203,25 @@ class AgentRun:
             )
             await self.store.fail_run(self.run_id, f"{type(exc).__name__}: {exc}")
             raise
+        await self._save_checkpoint(
+            phase="complete",
+            next_context_index=len(self.context.videos),
+            next_exploration_index=self.experiment.steps,
+        )
         await self.store.record_event(self.run_id, "run_completed")
         await self.store.finish_run(self.run_id)
 
     async def _run_context_phase(self) -> None:
+        start = self.checkpoint.next_context_index
+        if start >= len(self.context.videos):
+            return
         await self.store.record_event(
             self.run_id,
             "context_started",
-            payload={"context": self.context.id, "videos": len(self.context.videos)},
+            payload={"context": self.context.id, "videos": len(self.context.videos), "resume_from": start},
         )
-        for phase_index, video_id in enumerate(self.context.videos):
+        for phase_index in range(start, len(self.context.videos)):
+            video_id = self.context.videos[phase_index]
             step_id = await self.store.record_step(
                 run_id=self.run_id,
                 index=self._next_step_index(),
@@ -171,6 +246,11 @@ class AgentRun:
                 watch_fraction=result.watch_fraction,
             )
             self._last_video_id = video_id
+            await self._save_checkpoint(
+                phase="exploration" if phase_index + 1 == len(self.context.videos) else "context",
+                next_context_index=phase_index + 1,
+                next_exploration_index=0,
+            )
             await self.store.record_event(
                 self.run_id,
                 "context_video_watched",
@@ -184,17 +264,18 @@ class AgentRun:
         await self.store.record_event(self.run_id, "context_completed")
 
     async def _run_exploration_phase(self) -> None:
+        start = self.checkpoint.next_exploration_index
+        if start >= self.experiment.steps:
+            return
         await self.store.record_event(
             self.run_id,
             "exploration_started",
-            payload={"steps": self.experiment.steps},
+            payload={"steps": self.experiment.steps, "resume_from": start},
         )
-        session_remaining = 0
-        session_index = -1
-        for phase_index in range(self.experiment.steps):
+        for phase_index in range(start, self.experiment.steps):
             persona = self.policy.active_at(phase_index)
             habits = persona.habits if persona is not None else self.policy.baseline_habits
-            if session_remaining <= 0:
+            if self._session_remaining <= 0:
                 if phase_index > 0:
                     gap = self.rng.uniform(
                         self.experiment.pacing.session_gap_seconds.min,
@@ -203,12 +284,12 @@ class AgentRun:
                     await self.store.record_event(
                         self.run_id,
                         "session_gap",
-                        payload={"seconds": gap, "after_session": session_index},
+                        payload={"seconds": gap, "after_session": self._session_index},
                     )
                     if self.enforce_pacing:
                         await self.sleep(gap)
-                session_index += 1
-                session_remaining = self.rng.randint(
+                self._session_index += 1
+                self._session_remaining = self.rng.randint(
                     int(habits.videos_per_session.min),
                     int(habits.videos_per_session.max),
                 )
@@ -216,12 +297,18 @@ class AgentRun:
                     self.run_id,
                     "session_started",
                     payload={
-                        "session_index": session_index,
-                        "planned_videos": min(session_remaining, self.experiment.steps - phase_index),
+                        "session_index": self._session_index,
+                        "planned_videos": min(self._session_remaining, self.experiment.steps - phase_index),
                         "persona_at_start": persona.id if persona else None,
                     },
                 )
             surface = self._surface_for_step(phase_index, habits)
+            await self._save_checkpoint(
+                phase="exploration",
+                next_context_index=len(self.context.videos),
+                next_exploration_index=phase_index,
+                in_flight=f"collect:{surface}",
+            )
 
             await self.rate_gate.before_request()
             candidates = await self._collect(surface, persona)
@@ -240,6 +327,11 @@ class AgentRun:
                     usage=None,
                     chosen_video_id=None,
                 )
+                await self._save_checkpoint(
+                    phase="exploration",
+                    next_context_index=len(self.context.videos),
+                    next_exploration_index=phase_index + 1,
+                )
                 await self.store.record_event(
                     self.run_id,
                     "decision_failed",
@@ -248,8 +340,6 @@ class AgentRun:
                 )
                 raise
 
-            # ``resolve_choice`` guarantees a video ID; the guard makes that invariant
-            # explicit for type checkers and future Candidate changes.
             video_id = resolved.candidate.video_id
             if not video_id:
                 raise NoSelectableCandidate("resolved candidate unexpectedly has no video ID")
@@ -292,15 +382,48 @@ class AgentRun:
             )
             self._last_video_id = video_id
             self._history.append(resolved.candidate.title or video_id)
-            session_remaining -= 1
+            self._session_remaining -= 1
 
-            if self.enforce_pacing and phase_index + 1 < self.experiment.steps:
+            delay = None
+            if phase_index + 1 < self.experiment.steps:
                 delay = self.rng.uniform(
                     self.experiment.pacing.step_delay_seconds.min,
                     self.experiment.pacing.step_delay_seconds.max,
                 )
+            if delay is not None and self.enforce_pacing:
+                self.rate_gate.not_before = max(self.rate_gate.not_before, time.time() + delay)
+            await self._save_checkpoint(
+                phase="complete" if phase_index + 1 == self.experiment.steps else "exploration",
+                next_context_index=len(self.context.videos),
+                next_exploration_index=phase_index + 1,
+            )
+            if delay is not None and self.enforce_pacing:
                 await self.sleep(delay)
         await self.store.record_event(self.run_id, "exploration_completed")
+
+    async def _save_checkpoint(
+        self,
+        *,
+        phase: Literal["context", "exploration", "complete"],
+        next_context_index: int,
+        next_exploration_index: int,
+        in_flight: str | None = None,
+    ) -> None:
+        checkpoint = RunCheckpoint(
+            phase=phase,
+            next_context_index=next_context_index,
+            next_exploration_index=next_exploration_index,
+            global_step_index=self._global_step_index,
+            last_video_id=self._last_video_id,
+            history=list(self._history),
+            rng_state=_state_to_json(self.rng.getstate()),
+            session_remaining=self._session_remaining,
+            session_index=self._session_index,
+            not_before=self.rate_gate.not_before,
+            in_flight=in_flight,
+        )
+        self.checkpoint = checkpoint
+        await self.store.save_checkpoint(self.run_id, checkpoint.model_dump(mode="json"))
 
     def _next_step_index(self) -> int:
         value = self._global_step_index
@@ -315,8 +438,6 @@ class AgentRun:
             return "shorts"
         regular = [surface for surface in surfaces if surface not in {"search", "shorts"}]
         if not regular:
-            # A config can intentionally be search-only/shorts-only. Respect that
-            # rather than silently changing the experimental surface.
             return surfaces[phase_index % len(surfaces)]
         return regular[phase_index % len(regular)]
 

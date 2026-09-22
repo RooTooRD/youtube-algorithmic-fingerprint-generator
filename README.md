@@ -15,11 +15,11 @@ which established the two-phase LLM-persona audit protocol this project follows.
 The deliberate delta here is **signed-in identity**: TRACE audits signed-out
 personalization, `yafg` audits what a platform does once it believes it knows who you are.
 
-> **Status: P2 — agent loop implemented; live end-to-end smoke test pending.** Persistent
-> identities, rank-faithful observation, versioned persona prompts, Claude/Ollama choices,
-> deterministic behavior policies, context/exploration phases, evidence persistence and the
-> serial experiment runner are implemented. P3 adds bounded multi-account concurrency and
-> enrichment. See [ROADMAP](docs/ROADMAP.md).
+> **Status: P3 — scale/resume/enrichment implemented; live multi-agent validation pending.**
+> The runner expands single-persona experiments into persona × repetition arm matrices,
+> schedules them with bounded concurrency, checkpoints safe resume state, supports PostgreSQL
+> for parallel agents, and backfills YouTube metadata with optional public captions. See
+> [ROADMAP](docs/ROADMAP.md).
 
 ---
 
@@ -67,10 +67,10 @@ attributable to the persona and not to cold-start noise.
 | act | `browser/` | actually watch it, for real wall-clock time |
 | log | `store/` | persist the whole candidate set, the choice, the rank, the reason |
 
-Behavior modes, per TRACE: `single` (stable identity), `mixed` (weighted draw each
-step — one user, plural interests), `sequential` (preferences evolving over time),
-`random` (no persona; the control that separates algorithmic effects from behavioural
-ones).
+Behavior modes, per TRACE: `single` (one stable persona per run; multiple persona refs
+expand into separate arms), `mixed` (weighted draw each step — one user, plural interests),
+`sequential` (preferences evolving over time), and `random` (no model-visible persona; the
+control that separates algorithmic effects from behavioural ones).
 
 ## Layout
 
@@ -82,8 +82,8 @@ src/yafg/
   agent/       the loop and the persona policies
   llm/         provider port; Claude and Ollama implementations
   store/       append-only SQLAlchemy model (SQLite or Postgres)
-  enrich/      async YouTube Data API metadata backfill
-  experiment/  experiment schema, manifest resolution, serial P2 runner
+  enrich/      async YouTube Data API metadata + optional public-caption backfill
+  experiment/  experiment schema, manifest resolution, P3 matrix scheduler/resume
   analysis/    rank-weighted metrics, overlap, drift, exporters
 configs/       personas, contexts and experiments as versioned YAML
 ```
@@ -96,6 +96,16 @@ mise install && mise run install
 
 ```bash
 cp .env.example .env  # add ANTHROPIC_API_KEY, YOUTUBE_API_KEY
+uv run alembic upgrade head
+```
+
+P2's local `create_all` bootstrap did not record an Alembic revision. When upgrading a
+P2 database, run `uv run alembic current` first. If it prints no revision, stamp the P2
+schema before applying P3; do not stamp a database that already reports a revision:
+
+```bash
+uv run alembic stamp 8f2c3a1d9b7e
+uv run alembic upgrade head
 ```
 
 ```bash
@@ -110,8 +120,10 @@ uv run yafg account login amina-01
 uv run yafg run configs/experiments/demo-single-persona.yaml --dry-run
 ```
 
-The dry run resolves the context/personas, validates the provisioned account status,
-prints the canonical manifest hash and run plan, and makes no browser or LLM call.
+The dry run resolves the context/personas, validates every provisioned account, prints
+the canonical manifest hash, full arm matrix, bounded-concurrency plan, and an LLM
+token/cost envelope. It makes no browser or LLM call. Dollar estimates are shown only
+when `YAFG_LLM_INPUT_USD_PER_MILLION` and `YAFG_LLM_OUTPUT_USD_PER_MILLION` are set.
 For a visible first smoke test:
 
 ```bash
@@ -119,7 +131,28 @@ uv run yafg run configs/experiments/demo-single-persona.yaml --headed
 ```
 
 Set `llm.provider: ollama` in an experiment to use the local Ollama chat API instead of
-Claude. Random-baseline mode never invokes an LLM at all.
+Claude. Random-baseline mode never invokes an LLM at all. Parallel live execution
+(`concurrency > 1`) requires `postgresql+asyncpg://...`; SQLite remains the serial/local
+default. An interrupted matrix can be continued with `--resume`, but only from a durable
+checkpoint — the runner refuses ambiguous replay. Leases are attempt-scoped, so concurrent
+resume commands cannot open the same profile. After confirming no process still owns an
+orphaned lease, release it with the exact token shown by `yafg account list`:
+
+```bash
+uv run yafg account unlock amina-01 --lease-id <token>
+```
+
+After runs have produced video IDs, metadata enrichment is out-of-band:
+
+```bash
+uv run yafg enrich --limit 500
+uv run yafg enrich --limit 100 --transcripts  # explicit best-effort public captions
+```
+
+The official Data API is used for video metadata. Transcript retrieval is intentionally
+separate and opt-in because arbitrary caption downloads are not available through an
+API-key-only Data API request. Public-caption requests default to 120 per hour and cannot
+be configured above 240; a challenge or rate limit halts the transcript pass.
 
 ## Reproducibility
 
@@ -127,8 +160,10 @@ The stored `manifest_hash` is the SHA-256 of a canonical resolved manifest: expe
 context, referenced persona snapshots in declared order, prompt version **and template
 text**, implementation version, and the declared behavior seed. Editing a referenced
 config or the prompt therefore changes experimental identity. Each repetition derives a
-stable behavior seed from the declared seed. Partial runs are kept — a run that dies at
-step 31 of 50 is data, not garbage.
+stable behavior seed from the declared seed; matching repetitions across single-persona
+arms receive the same seed. Partial runs are kept — a run that dies at step 31 of 50 is
+data, not garbage — and P3 checkpoints the RNG/session/history state after each durable
+step so safe interruptions can resume without replaying account history.
 
 ## License
 
